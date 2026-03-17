@@ -1,0 +1,139 @@
+Polymarket 5-Minute BTC Trading Bot — Full Technical Brief for Claude
+Based on your content, here is everything Claude Code will need to build this bot.
+
+📌 Strategy Overview
+Market: Polymarket — "BTC Up or Down - 5 Minutes" Core Logic: In the final 60–90 seconds of a 5-minute market, the contract price lags behind where Bitcoin is actually trading. The bot identifies this lag and fires a trade milliseconds before the market corrects/settles.
+Manual version (from your reel):
+	•	If "Buy Up" or "Buy Down" drops below 25¢ in the first 2 minutes → buy it
+	•	Immediately set a limit sell at 40¢ → ~2x return
+Automated version (Clawbot logic):
+	•	Watch thousands of markets simultaneously
+	•	Detect price lag vs. real BTC spot price
+	•	Fire trades in milliseconds before correction
+	•	Repeat at high volume for compounding small edges
+
+🤖 Bot Architecture
+1. Data Feeds Required
+- Polymarket API (market prices, order book, market close time)
+- Real-time BTC spot price feed (Binance or Coinbase WebSocket)
+- Polymarket CLOB (Central Limit Order Book) API for order placement
+2. Core Logic Flow
+EVERY 5-MINUTE MARKET CYCLE:
+1. Fetch current BTC spot price (Binance WS)
+2. Fetch Polymarket contract prices for that market
+3. Calculate: Is BTC already UP or DOWN vs. market open price?
+4. Check: Is the contract price lagging? (e.g., BTC is up but "Up" contract is still at 0.45 instead of 0.80+)
+5. If lag detected AND < 90 seconds to close → FIRE BUY
+6. Set limit sell at target price OR hold to settlement
+7. Log trade, P&L, and outcome
+3. Lag Detection Formula
+btc_direction = "UP" if current_btc > market_open_btc else "DOWN"
+contract_price = get_polymarket_price(direction=btc_direction)
+lag_threshold = 0.15  # if contract is more than 15 cents underpriced
+
+if contract_price < (expected_fair_value - lag_threshold):
+    fire_trade(direction=btc_direction, size=position_size)
+
+🔧 Tech Stack Recommendation
+Component
+Tool
+Language
+Python 3.11+
+BTC Price Feed
+Binance WebSocket API
+Polymarket Prices
+Polymarket CLOB REST + WebSocket API
+Order Execution
+Polymarket CLOB API (py-clob-client)
+Wallet/Auth
+Ethereum wallet (private key signing)
+Scheduling
+asyncio event loop
+Logging
+CSV + console logger
+VPN/Proxy
+See geo-block workaround below
+
+🔑 Polymarket API Details
+Base URL: https://clob.polymarket.com
+Auth: L1 or L2 Ethereum wallet signature
+SDK: pip install py-clob-client
+
+Key endpoints:
+- GET /markets → list active markets
+- GET /orderbook/{market_id} → live order book
+- POST /order → place buy/sell order
+- GET /positions → current holdings
+Wallet setup:
+	•	Create an Ethereum wallet (MetaMask or raw private key)
+	•	Fund with USDC on Polygon network
+	•	Bot signs all orders with private key
+
+🌏 Australia Geo-Block Workaround
+You have two solid options:
+
+✅ Option 1 — Residential Proxy (Recommended)
+Route all bot traffic through a US-based residential proxy.
+# In your requests/httpx config:
+proxies = {
+    "http": "http://user:pass@us-residential-proxy:port",
+    "https": "http://user:pass@us-residential-proxy:port"
+}
+Best providers:
+	•	Bright Data (most reliable, residential IPs)
+	•	Oxylabs
+	•	Smartproxy
+✅ Looks like real US traffic. Low ban risk. Works with WebSockets.
+
+✅ Option 2 — VPS in the US (Most Reliable for a Bot)
+Deploy the entire bot on a US-based cloud server — no geo-block at all since the server is in the US.
+Providers:
+- DigitalOcean (New York / San Francisco droplet) ~$6/mo
+- Vultr
+- AWS EC2 (us-east-1)
+- Hetzner (US locations)
+This is the cleanest solution — your bot runs 24/7 on a US IP, no VPN overhead, no latency added, no risk of proxy dropping mid-trade.
+
+⚠️ Option 3 — VPN on Local Machine (Not Recommended for Bot)
+A regular VPN (NordVPN, ExpressVPN) works for manual browsing but is unreliable for a trading bot because:
+	•	VPN can disconnect mid-session
+	•	Adds latency (bad for millisecond execution)
+	•	IP can get flagged
+
+⚡ Latency Optimisation (Critical)
+Since this is a millisecond-timing strategy:
+1. Host bot on US East VPS (closest to Polymarket servers)
+2. Use WebSocket connections (not REST polling) for price feeds
+3. Pre-authenticate and keep session alive
+4. Pre-calculate position sizes so no compute delay at fire time
+5. Use async/await throughout (never blocking calls)
+
+🛡️ Risk Management Parameters
+MAX_POSITION_SIZE = 50        # Max $ per trade
+MAX_DAILY_LOSS = 200          # Stop bot if daily loss hits this
+MIN_SECONDS_TO_CLOSE = 10     # Don't enter if < 10s left
+MAX_SECONDS_TO_CLOSE = 90     # Only enter in final 90s window
+LAG_THRESHOLD = 0.15          # Min price lag to trigger entry
+TARGET_SELL_PRICE = 0.40      # Limit sell target (from manual strategy)
+ENTRY_MAX_PRICE = 0.25        # Only buy if contract is below 25¢
+
+📁 Suggested File Structure
+polymarket-bot/
+├── main.py              # Entry point, event loop
+├── config.py            # API keys, wallet, risk params
+├── feeds/
+│   ├── btc_feed.py      # Binance WebSocket BTC price
+│   └── poly_feed.py     # Polymarket price + market data
+├── strategy/
+│   └── lag_detector.py  # Core lag detection logic
+├── execution/
+│   └── order_manager.py # Place, track, cancel orders
+├── utils/
+│   ├── logger.py        # Trade logging to CSV
+│   └── proxy.py         # Geo-block proxy config
+└── requirements.txt
+
+🚀 Prompt to Give Claude Code
+"Build a Python trading bot for Polymarket's 5-minute BTC Up/Down markets. Use the Binance WebSocket for real-time BTC spot price and the Polymarket CLOB API (py-clob-client) for order execution. The strategy is: in the final 90 seconds of each market, detect if the contract price is lagging behind BTC's actual direction by more than 15 cents, then fire a buy order. Set a limit sell at 40¢. Use asyncio for all feeds. Include risk management (max $50/trade, $200 daily loss limit). Route all traffic through a US residential proxy (configurable in config.py). Log all trades to CSV. Use the file structure provided."
+
+⚠️ Disclaimer: Polymarket's terms of service restrict automated trading and access from certain regions. Use this for educational/research purposes and ensure compliance with applicable laws.
