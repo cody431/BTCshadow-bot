@@ -1,76 +1,96 @@
 """
-Polymarket feed — fetches active BTC 5-minute markets, order book prices,
-and market close times via the CLOB REST API.
+Polymarket feed — fetches active BTC 5-minute markets and prices
+via the Gamma API (gamma-api.polymarket.com).
 """
 
-import asyncio
 import httpx
 from datetime import datetime, timezone
-from config import POLYMARKET_HOST, VERIFY_SSL
-from utils.proxy import get_proxy_config
+from config import VERIFY_SSL
 
 
 def _client() -> httpx.AsyncClient:
-    proxy_config = get_proxy_config()
-    # httpx 0.20+ uses 'proxy' (single string) instead of 'proxies' (dict)
-    if proxy_config:
-        proxy_url = list(proxy_config.values())[0]
-        return httpx.AsyncClient(proxy=proxy_url, verify=VERIFY_SSL, timeout=10.0)
     return httpx.AsyncClient(verify=VERIFY_SSL, timeout=10.0)
 
 
 async def get_active_btc_markets() -> list[dict]:
     """
-    Returns a list of active Polymarket markets matching BTC 5-minute format.
-    Each market dict contains: id, question, close_time, tokens (UP/DOWN).
+    Returns active BTC 5-minute up/down markets from the Gamma API.
+    Each dict contains: id, question, close_time, tokens, price_up, price_down
     """
     async with _client() as client:
-        resp = await client.get(f"{POLYMARKET_HOST}/markets", params={"active": "true"})
+        resp = await client.get(
+            "https://gamma-api.polymarket.com/events",
+            params={"active": "true", "limit": "50"}
+        )
         resp.raise_for_status()
-        markets = resp.json().get("data", [])
+        events = resp.json()
 
-    btc_markets = []
-    for m in markets:
-        question = m.get("question", "").lower()
-        if "btc" in question and ("up or down" in question or "5 minute" in question or "5min" in question):
-            btc_markets.append({
-                "id": m["condition_id"],
-                "question": m["question"],
-                "close_time": m.get("end_date_iso") or m.get("close_time"),
-                "tokens": m.get("tokens", []),
+    markets = []
+    for event in events:
+        ticker = event.get("ticker", "")
+        if "btc-updown-5m" not in ticker:
+            continue
+        if event.get("closed") or not event.get("active"):
+            continue
+
+        for m in event.get("markets", []):
+            outcomes = m.get("outcomes", "[]")
+            prices = m.get("outcomePrices", "[]")
+
+            # Parse JSON strings if needed
+            if isinstance(outcomes, str):
+                import json
+                outcomes = json.loads(outcomes)
+                prices = json.loads(prices)
+
+            price_up = 0.0
+            price_down = 0.0
+            for i, outcome in enumerate(outcomes):
+                if outcome.lower() == "up":
+                    price_up = float(prices[i])
+                elif outcome.lower() == "down":
+                    price_down = float(prices[i])
+
+            markets.append({
+                "id": m.get("conditionId"),
+                "question": m.get("question"),
+                "close_time": m.get("endDate"),
+                "tokens": m.get("clobTokenIds", []),
+                "price_up": price_up,
+                "price_down": price_down,
             })
-    return btc_markets
+
+    return markets
 
 
 async def get_contract_price(market_id: str, direction: str) -> float:
     """
-    Returns the best ask price for the UP or DOWN token in a given market.
-    direction: "UP" or "DOWN"
+    Returns the current price for UP or DOWN from the Gamma API.
     """
     async with _client() as client:
-        resp = await client.get(f"{POLYMARKET_HOST}/orderbook/{market_id}")
+        resp = await client.get(
+            "https://gamma-api.polymarket.com/markets",
+            params={"conditionId": market_id}
+        )
         resp.raise_for_status()
-        book = resp.json()
+        data = resp.json()
 
-    # The order book has bids/asks per token. We want the best ask (cheapest to buy).
-    token_id = _get_token_id(book, direction)
-    if not token_id:
+    if not data:
         return 0.0
 
-    asks = book.get("asks", {}).get(token_id, [])
-    if not asks:
-        return 0.0
-    # asks are sorted ascending by price
-    return float(asks[0]["price"])
+    m = data[0] if isinstance(data, list) else data
+    outcomes = m.get("outcomes", "[]")
+    prices = m.get("outcomePrices", "[]")
 
+    if isinstance(outcomes, str):
+        import json
+        outcomes = json.loads(outcomes)
+        prices = json.loads(prices)
 
-def _get_token_id(book: dict, direction: str) -> str | None:
-    """Finds the token ID for UP or DOWN direction from the order book metadata."""
-    for token in book.get("tokens", []):
-        outcome = token.get("outcome", "").upper()
-        if direction.upper() in outcome:
-            return token.get("token_id")
-    return None
+    for i, outcome in enumerate(outcomes):
+        if outcome.lower() == direction.lower():
+            return float(prices[i])
+    return 0.0
 
 
 def seconds_to_close(close_time_iso: str) -> float:
